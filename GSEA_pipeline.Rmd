@@ -1,0 +1,297 @@
+## 0. Importing Required Packages
+```{r setup, include=FALSE}
+library(tidyverse)
+library(DESeq2)
+library(patchwork)
+library(clusterProfiler)
+library(enrichplot)
+library(pathview)
+# Mouse annotation data download
+organism <- "org.Mm.eg.db"
+BiocManager::install(organism, character.only = TRUE, force = TRUE)
+library(organism, character.only = TRUE)
+```
+
+## 1. Loading Samples and Gene Info
+For DEG Analysis, we need the following:
+* Gene Count Matrix
+* Gene Info (For additional/meta gene information)
+The count matrix should have the dimensions:
+* Cols: Samples
+* Rows: Genes
+```{r setup, include=FALSE}
+# Loading htseq files
+htseq_files <- dir(path = "./htseq", pattern = ".out", full.names = TRUE)
+htseq_table_list <- lapply(
+  htseq_files,
+  function(x) read.table(x, sep = "\t")
+)
+unique_genes <- unique(unlist(
+  # "[[" searches through elements, the 3rd argument is the column number
+  lapply(htseq_table_list, "[[", 1),
+  use.names = FALSE
+))
+sample_names <- str_extract(htseq_files, pattern = "SRR[0-9]+")
+# Loading gene info
+gene_info <- read.table("geneInfo_copy.tsv", sep = "\t")
+
+# creating count matrix
+# create empty count matrix
+# rownames will be gene names not the gene ID
+count_matrix <- structure(
+  matrix(
+    as.integer(NA),
+    nrow = length(unique_genes),
+    ncol = length(htseq_files)
+  ),
+  dimnames = list(unique_genes, sample_names)
+)
+# fill in the count matrix column-wise
+for (i in seq(length(htseq_table_list))) {
+  count_matrix[match(htseq_table_list[[i]]$V1, rownames(count_matrix)), i] <-
+    htseq_table_list[[i]]$V2
+}
+# drop non-unique alignments and non-gene entries
+drop_classes <- c(
+  "__alignment_not_unique", "__no_feature", "__ambiguous",
+  "__too_low_aQual", "__not_aligned"
+)
+if (any(drop_classes %in% rownames(count_matrix))) {
+  count_matrix <- count_matrix[-match(drop_classes, rownames(count_matrix)), ]
+}
+# changing row and column names
+# row names will be the gene names instead of gene IDs
+# Column names will be sample replication names instead of ENA IDs
+colnames(count_matrix) <- c(
+  "Naive_Control_Rep_1",
+  "Naive_Control_Rep_2",
+  "Naive_Control_Rep_3",
+  "Naive_DEX_Rep_1",
+  "Naive_DEX_Rep_2",
+  "Naive_DEX_Rep_3"
+)
+head(count_matrix)
+```
+
+## 8. GSEA Cluster Profiler
+DEG Analasis shows low amount of DEGs (38).
+Full ORA may not be useful here
+In this case, we will use GSEA cluseter profiler
+packages needed to be installed:
+- ClusterProfiler
+- EnrichPlot
+- PathView
+
+# 8.1 Preparation
+```{r status, input = FALSE}
+# DESeq
+col_data <- as.data.frame(c(
+  rep("Naive_Control", 3),
+  rep("Naive_DEX", 3)
+))
+rownames(col_data) <- colnames(count_matrix)
+colnames(col_data) <- "condition"
+dds <- DESeqDataSetFromMatrix(
+  countData = count_matrix,
+  colData = col_data,
+  design = ~condition
+)
+keep <- rowSums(counts(dds)) >= 10
+dds <- dds[keep, ]
+dds <- DESeq(dds)
+normcount <- counts(dds, normalized = TRUE)
+res <- results(dds, contrast = c("condition", "Naive_DEX", "Naive_Control"))
+
+# Input preparation
+gene_list <- res$log2FoldChange
+names(gene_list) <- str_extract(
+  rownames(res),
+  pattern = "(^[A-Za-z]+[0-9]+).*",
+  group = 1
+)
+gene_list <- na.omit(gene_list)
+gene_list <- sort(gene_list, decreasing = TRUE)
+head(gene_list)
+
+# gene ontology list
+gse <- gseGO(
+  geneList = gene_list,
+  ont = "ALL",
+  keyType = "ENSEMBL",
+  nPerm = 10000,
+  minGSSize = 3,
+  maxGSSize = 800,
+  pvalueCutoff = 0.05,
+  verbose = TRUE,
+  OrgDb = organism,
+  pAdjustMethod = "none"
+)
+```
+
+# 8.2 Dotplot
+```{r status, input = FALSE}
+require(DOSE)
+png(
+  "./GSEA_plots/GSEA_1_Enrichment_Dot_Plot.png",
+  width = 900,
+  height = 900
+)
+dotplot(gse, showCategory = 10, split = ".sign") + facet_grid(. ~ .sign)
+dev.off()
+```
+
+# 8.3 Enrichment Map
+```{r status, input = FALSE}
+png(
+  "./GSEA_plots/GSEA_2_Enrichment_Map.png",
+  width = 800,
+  height = 800,
+)
+x <- pairwise_termsim(gse, showCategory = 10)
+emapplot(
+  x,
+  showCategory = 10
+)
+dev.off()
+```
+
+# 8.4 Category Network Map
+```{r status, input = FALSE}
+png("./GSEA_plots/GSEA_3_Enrichment_Cnet_Plot.png")
+cnetplot(gse, categorySize = "pvalue", foldChange = gene_list, showCategory = 3)
+dev.off()
+```
+
+# 8.5 RidgePlot
+```{r status, input = FALSE}
+png(
+  "./GSEA_plots/GSEA_4_Ridge_Plot.png",
+  width = 600,
+  height = 900
+)
+ridgeplot(gse) + labs(x = "enrichment distribution")
+dev.off()
+```
+
+# 8.6 GSEA Analysis
+```{r status, input = FALSE}
+png(
+  "./GSEA_plots/GSEA_5_GSEA_Plot.png"
+)
+gseaplot(
+  gse,
+  by = "all",
+  geneSetID = 1,
+  title = gse$Description[1]
+)
+dev.off()
+```
+
+## 9. KEGG Gene Set Enrichment Analysis
+we need to used gseKEGG() function
+and convert ID types
+```{r status, input = FALSE}
+# Convert Gend IDs for gseKEGG function
+# Will be losing some genes during this process
+ids <- bitr(
+  names(gene_list),
+  fromType = "ENSEMBL",
+  toType = "ENTREZID",
+  OrgDb = organism
+)
+# remove duplicates
+dedup_ids <- ids[!duplicated(ids[c("ENSEMBL")]), ]
+# Create dataframe for KEGG
+kegg_df <- res[str_extract(rownames(res), pattern = "(^[A-Z]+[0-9]+).*", group = 1) %in% dedup_ids$ENSEMBL, ]
+kegg_df$Y <- dedup_ids$ENTREZID
+kegg_gene_list <- kegg_df$log2FoldChange
+names(kegg_gene_list) <- kegg_df$Y
+kegg_gene_list <- na.na.omit(kegg_gene_list)
+kegg_gene_list <- sort(kegg_gene_list, decreasing = TRUE)
+
+kegg_organism <- "mmu"
+kk2 <- gseKEGG(
+  geneList = kegg_gene_list,
+  organism = kegg_organism,
+  nPerm = 10000,
+  minGSSize = 3,
+  maxGSSize = 800,
+  pvalueCutoff = 0.05,
+  pAdjustMethod = "none",
+  keyType = "ncbi-geneid"
+)
+```
+
+# 9.1 Kegg Dotplot
+```{r status, input = FALSE}
+png("./GSEA_plots/KEGG_1_Enrichment_Dot_Plot.png", width = 900, height = 900)
+dotplot(
+  kk2,
+  showCategory = 10,
+  title = "Enriched Pathways",
+  split = ".sign"
+) +
+  facet_wrap(. ~ .sign)
+dev.off()
+```
+
+# 9.2 Enrichment Map
+```{r status, input = FALSE}
+png(
+  "./GSEA_plots/KEGG_2_Enrichment_Map.png",
+  width = 800,
+  height = 800,
+)
+x <- pairwise_termsim(kk2, showCategory = 10)
+emapplot(
+  x,
+  showCategory = 10
+)
+dev.off()
+```
+
+# 9.3 Cnet map
+```{r status, input = FALSE}
+png("./GSEA_plots/KEGG_3_Enrichment_Cnet_Plot.png")
+cnetplot(kk2, categorySize = "pvalue", foldChange = gene_list, showCategory = 3)
+dev.off()
+```
+
+# 8.5 RidgePlot
+```{r status, input = FALSE}
+png(
+  "./GSEA_plots/KEGG_4_Ridge_Plot.png",
+  width = 600,
+  height = 900
+)
+ridgeplot(kk2) + labs(x = "enrichment distribution")
+dev.off()
+```
+
+```{r status, input = FALSE}
+png(
+  "./GSEA_plots/KEGG_5_GSEA_Plot.png",
+  width = 800,
+  height = 600
+)
+gseaplot(
+  kk2,
+  by = "all",
+  geneSetID = 1,
+  title = kk2$Description[1]
+)
+dev.off()
+```
+
+# 8.6 KEGG Pathway Analysis
+Pathway ID can be found within the dataframe generated by gseKEGG()
+```{r status, input = FALSE}
+# plot top 3 pathways
+top_pathways <- kk2$ID[1:3]
+for (path_id in top_pathways) {
+  # KEGG Plot
+  dme <- pathview(gene.data = kegg_gene_list, pathway.id = path_id, species = kegg_organism)
+  # GraphViz Plot
+  dme <- pathview(gene.data = kegg_gene_list, pathway.id = path_id, species = kegg_organism, kegg.native = F)
+}
+```

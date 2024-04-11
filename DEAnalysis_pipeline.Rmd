@@ -1,0 +1,487 @@
+---
+title: "Differentially Expressed Genes Analysis Pipeline"
+output:
+  html_document: default
+  pdf_document: default
+---
+
+## 0. Importing Required Packages
+```{r setup, include=FALSE}
+library(tidyverse)
+library(DESeq2)
+library(xtable)
+library(gplots)
+library(RColorBrewer)
+library(factoextra)
+library(ggpubr)
+library(pheatmap)
+library(gplots)
+library(EnhancedVolcano)
+library(stringr)
+library(patchwork)
+library(rgl)
+```
+
+## 1. Loading Samples and Gene Info
+For DEG Analysis, we need the following:
+* Gene Count Matrix
+* Gene Info (For additional/meta gene information)
+The count matrix should have the dimensions:
+* Cols: Samples
+* Rows: Genes
+```{r setup, include=FALSE}
+# Loading htseq files
+htseq_files <- dir(path = "./htseq", pattern = ".out", full.names = TRUE)
+htseq_table_list <- lapply(
+  htseq_files,
+  function(x) read.table(x, sep = "\t")
+)
+unique_genes <- unique(unlist(
+  # "[[" searches through elements, the 3rd argument is the column number
+  lapply(htseq_table_list, "[[", 1),
+  use.names = FALSE
+))
+sample_names <- str_extract(htseq_files, pattern = "SRR[0-9]+")
+# Loading gene info
+gene_info <- read.table("geneInfo_copy.tsv", sep = "\t")
+
+# creating count matrix
+# create empty count matrix
+# rownames will be gene names not the gene ID
+count_matrix <- structure(
+  matrix(
+    as.integer(NA),
+    nrow = length(unique_genes),
+    ncol = length(htseq_files)
+  ),
+  dimnames = list(unique_genes, sample_names)
+)
+# fill in the count matrix column-wise
+for (i in seq(length(htseq_table_list))) {
+  count_matrix[match(htseq_table_list[[i]]$V1, rownames(count_matrix)), i] <-
+    htseq_table_list[[i]]$V2
+}
+# drop non-unique alignments and non-gene entries
+drop_classes <- c(
+  "__alignment_not_unique", "__no_feature", "__ambiguous",
+  "__too_low_aQual", "__not_aligned"
+)
+if (any(drop_classes %in% rownames(count_matrix))) {
+  count_matrix <- count_matrix[-match(drop_classes, rownames(count_matrix)), ]
+}
+# changing row and column names
+# row names will be the gene names instead of gene IDs
+# Column names will be sample replication names instead of ENA IDs
+colnames(count_matrix) <- c(
+  "Naive_Control_Rep_1",
+  "Naive_Control_Rep_2",
+  "Naive_Control_Rep_3",
+  "Naive_DEX_Rep_1",
+  "Naive_DEX_Rep_2",
+  "Naive_DEX_Rep_3"
+)
+rownames(count_matrix) <-
+  gene_info[match(rownames(count_matrix), gene_info$V1), 2]
+head(count_matrix)
+```
+
+
+## 2. Plotting Read Numbers Per Sample
+read numbers per sample is important because we need to normalize gene counts
+```{r setup, include = FALSE}
+df <- data.frame(colSums(count_matrix))
+ggplot(df) +
+  geom_bar(
+    aes(
+      x = rownames(df),
+      y = df[, 1]
+    ),
+    stat = "identity"
+  ) +
+  labs(
+    title = "Read Numbers per Sample",
+    x = "Samples",
+    y = "Count"
+  ) +
+  theme(
+    plot.title = element_text(size = 20),
+    axis.title.x = element_text(size = 12),
+    axis.title.y = element_text(size = 12)
+  )
+ggsave(
+  "00_Read_Numbers_per_Sample.png",
+  width = 12,
+  height = 16
+)
+```
+
+## 3. Differentially Expressed Gene Analysis
+# 3.0 DESeq Preparation and Normalization
+```{r setup, include = FALSE}
+# make condition matrix for sample information
+col_data <- as.data.frame(c(
+  rep("Naive_Control", 3),
+  rep("Naive_DEX", 3)
+))
+rownames(col_data) <- colnames(count_matrix)
+colnames(col_data) <- "condition"
+
+dds <- DESeqDataSetFromMatrix(
+  countData = count_matrix,
+  colData = col_data,
+  design = ~condition
+)
+keep <- rowSums(counts(dds)) >= 10
+dds <- dds[keep, ]
+dds <- DESeq(dds)
+normcount <- counts(dds, normalized = TRUE)
+write.csv(as.data.frame(normcount), file = "normcount.csv")
+res <- results(dds, contrast = c("condition", "Naive_DEX", "Naive_Control"))
+
+padj_cutoff <- 0.05
+log2_fold_change_cutoff <- 0.58
+# preparation for heatmap - regulated genes classification
+res$DEG <- 2
+# Up-regulated genes
+res[
+  res$padj < padj_cutoff &
+    res$log2FoldChange > log2_fold_change_cutoff &
+    is.na(res$padj) == 0,
+  7
+] <- 1
+# Down-regulated genes
+res[
+  res$padj < padj_cutoff &
+    res$log2FoldChange < (-log2_fold_change_cutoff) &
+    is.na(res$padj) == 0,
+  7
+] <- 3
+
+# Extracting transformed values - Variance Stabilizing Transformation
+vsd <- vst(dds, blind = FALSE)
+rld <- rlog(dds, blind = FALSE)
+ntd <- normTransform(dds)
+
+head(res)
+head(assay(vsd))
+```
+# 3.1 Correlation Analysis
+```{r setup, input=FALSE}
+cor_methods <- c("spearman", "kendall", "pearson")
+for (method in cor_methods) {
+  cor_matrix_h_cluster <-
+    hclust(1 - as.dist(cor(normcount, method = method)))
+  png(paste("01_General Correlation_", method, ".png", sep = ""))
+  plot(
+    cor_matrix_h_cluster,
+    main = NA,
+    xlab = paste(method, "correlation distance", sep = " ")
+  )
+  dev.off()
+}
+```
+
+# 3.2 PCA and Eigenvalues
+Eigenvalues are directly related to principal components
+the higher the eigenvalue, the more variance it explains
+1. doing thing as given by professor
+```{r status, input = FALSE}
+# 1. doing it as given from the professor
+normcount_var <- matrix(0, nrow(normcount), 2)
+for (i in seq_len(nrow(normcount_var))) {
+  normcount_var[i, 1] <- sd(normcount[i, ])
+}
+normcount_var[, 2] <- rank(-1 * normcount_var[, 1])
+
+data_sub_t <-
+  as.data.frame(
+    ## Column: genes, ##Rows: samples
+    t(normcount[normcount_var[, 1] != 0, ])
+  )
+data_pca_scale <- prcomp(data_sub_t, center = TRUE, scale = TRUE)
+ind_coord <- data_pca_scale$x
+data_lab_mat_sub <- c("blue", "blue", "blue", "skyblue", "skyblue", "skyblue")
+png("02_PCA_Tutorial_Version_PC12.png")
+plot(
+  ind_coord[, 1], ind_coord[, 2],
+  col = data_lab_mat_sub, pch = 16, xlab = "PC1", ylab = "PC2", cex = 1
+)
+legend(
+  "topleft",
+  legend = c("Control", "DEX"), pch = 16, col = c("blue", "skyblue"), cex = 0.5
+)
+dev.off()
+png("02_PCA_Tutorial_Version_PC13.png")
+plot(
+  ind_coord[, 1], ind_coord[, 3],
+  col = data_lab_mat_sub, pch = 16, xlab = "PC1", ylab = "PC3", cex = 1
+)
+legend(
+  "topleft",
+  legend = c("Control", "DEX"), pch = 16, col = c("blue", "skyblue"), cex = 0.5
+)
+dev.off()
+png("02_PCA_Tutorial_Version_PC23.png")
+plot(
+  ind_coord[, 2], ind_coord[, 3],
+  col = data_lab_mat_sub, pch = 16, xlab = "PC2", ylab = "PC3", cex = 1
+)
+legend(
+  "topleft",
+  legend = c("Control", "DEX"), pch = 16, col = c("blue", "skyblue"), cex = 0.5
+)
+dev.off()
+```
+
+1.1 3D PCA cause why not
+```{r status, input = FALSE}
+pca_scores <- as.data.frame(data_pca_scale$x)
+plot3d(pca_scores[, 1:3],
+  size = 5,
+  col = seq(nrow(pca_scores))
+)
+text3d(pca_scores[, 1:3],
+  texts = c(rownames(pca_scores)),
+  cex = 0.7, pos = 3
+)
+```
+
+2. Doing it using plotPCA (DESeq2 tool)
+```{r status, input = FALSE}
+pca_data <- plotPCA(vsd, intgroup = "condition", returnData = TRUE)
+percent_var <- round(100 * attr(pca_data, "percentVar"))
+ggplot(pca_data) +
+  geom_point(
+    mapping = aes(PC1, PC2, color = condition),
+    size = 3
+  ) +
+  labs(
+    title = "PCA Results with VST",
+    x = paste0("PC1: ", percent_var, "% variance", sep = ""),
+    y = paste0("PC2: ", percent_var, "% variance", sep = ""),
+  ) +
+  theme(
+    plot.title = element_text(size = 22),
+    axis.title = element_text(size = 15)
+  ) +
+  coord_fixed()
+ggsave(
+  "02_PCA_plotPCA_Version.png",
+  width = 10,
+  height = 10
+)
+```
+3. Eigenvalues Plot
+```{r status, input = FALSE}
+# Eigenvalues
+eig <- (data_pca_scale$sdev)^2
+# Variances in percentage
+variance <- eig * 100 / sum(eig)
+# Cumulative variances
+cumvar <- cumsum(variance)
+eig_decathlon2_activate <- data.frame(
+  eig = eig, variance = variance,
+  cumvariance = cumvar
+)
+png("03_Eigenvalue_Plot_Tutorial_Version.png")
+barplot(eig_decathlon2_activate[1:10, 2],
+  names.arg = 1:10,
+  main = "Variances",
+  xlab = "Principal Components",
+  ylab = "Percentage of variances",
+  col = "steelblue"
+)
+# Add connected line segments to the plot
+lines(
+  x = 1:10,
+  eig_decathlon2_activate[1:10, 2],
+  type = "b", pch = 19, col = "red"
+)
+dev.off()
+```
+# 4. heatmap
+1. Tutorial Version
+```{r status, input = FALSE}
+breaks_list <- seq(-3, 3, by = 0.1)
+breaks_list <- append(breaks_list, 20)
+breaks_list <- append(breaks_list, -20, 0)
+mycol <- colorpanel(
+  n = length(breaks_list) - 1,
+  low = "blue",
+  mid = "white",
+  high = "red"
+)
+pdf("04_Heatmap_Tutorial_Version.pdf")
+pheatmap(
+  normcount[res$DEG != 2, 1:6],
+  show_rownames = TRUE,
+  show_colnames = TRUE,
+  cluster_cols = FALSE,
+  cluster_rows = TRUE,
+  scale = "row",
+  col = mycol,
+  breaks = breaks_list,
+  clustering_distance_cols = "euclidean", cex = 0.8,
+  main = "Pheatmap"
+)
+dev.off()
+```
+2. DESeq2 Tutorial Version
+```{r status, input = FALSE}
+mat <- assay(vsd)[
+  row.names(vsd) %in% row.names(res[res$DEG != 2, ]),
+]
+pdf("04_Heatmap_DESeq2_Version.pdf")
+pheatmap(
+  mat = mat,
+  cluster_rows = TRUE,
+  show_rownames = TRUE,
+  cluster_cols = FALSE,
+  main = "Pheatmap (Variance Stabilization Transformed)"
+)
+dev.off()
+```
+
+# 5. Gene Expression Counts Plot
+There were 3 genes that were marked as significant in the paper
+all of which was not the one with the highest p value nor the highest fold change
+We will plot the 3 genes + "statistically most significant" gene
+```{r status, input = FALSE}
+gene_list <- c(
+  "Eomes",
+  "Tbx21",
+  "Cxcr3"
+)
+plot_list <- list()
+for (n in 1:9) {
+  p <- ggplot() +
+    theme_void()
+  plot_list[[n]] <- p
+}
+i <- 1
+for (gene in gene_list) {
+  tmp_df <- plotCounts(
+    dds,
+    gene = gene,
+    intgroup = "condition",
+    normalized = TRUE,
+    returnData = TRUE
+  )
+  plot_list[[i]] <- ggplot(tmp_df) +
+    geom_point(
+      aes(x = condition, y = count, color = condition),
+      # position = position_jitter(w = 0.1, h = 0),
+      size = 3
+    ) +
+    labs(
+      title = gene,
+      subtitle = paste(
+        "P-value: ", res[rownames(res) == gene, "padj"],
+        sep = ""
+      )
+    )
+  i <- i + 1
+}
+
+i <- 1
+# 6 best padj value genes
+for (top_gene in 1:6) {
+  tmp_df <- plotCounts(
+    dds,
+    gene = order(res$padj)[i],
+    intgroup = "condition",
+    normalized = TRUE,
+    returnData = TRUE
+  )
+  plot_list[[i + 3]] <- ggplot(tmp_df) +
+    geom_point(
+      aes(x = condition, y = count, color = condition),
+      # position = position_jitter(w = 0.1, h = 0),
+      size = 3
+    ) +
+    labs(
+      title = row.names(res[order(res$padj)[i], ]),
+      subtitle = paste("P-value: ", res[order(res$padj)[i], "padj"], sep = ""),
+    )
+
+  i <- i + 1
+}
+
+# combine 4 plots into a 3x3 grid
+final_plot <-
+  plot_list[[1]] + plot_list[[2]] + plot_list[[3]] +
+  plot_list[[4]] + plot_list[[5]] + plot_list[[6]] +
+  plot_list[[7]] + plot_list[[8]] + plot_list[[9]] +
+  plot_layout(
+    ncol = 3,
+    nrow = 3,
+    guides = "collect"
+  )
+ggsave(
+  "05_Gene_Expression_Count_With_Top_padj_Genes.png", final_plot,
+  width = 15,
+  height = 15
+)
+```
+
+# 6. Sample Distance heatmap
+```{r status, input = FALSE}
+sample_distance <- dist(t(assay(vsd)))
+sample_dist_matrix <- as.matrix(sample_distance)
+rownames(sample_dist_matrix) <- paste(vsd$condition, vsd$type, sep = "-")
+colnames(sample_dist_matrix) <- NULL
+colors <- colorRampPalette(rev(brewer.pal(9, "Blues")))(255)
+pdf("06_sample_distance_matrix_heatmap.pdf")
+pheatmap(sample_dist_matrix,
+  clustering_distance_rows = sample_distance,
+  clustering_distance_cols = sample_distance,
+  col = colors
+)
+dev.off()
+```
+
+# 7. Volcano Plot
+```{r status, input = FALSE}
+png("07_Volcano_Plot_1.png")
+EnhancedVolcano(res,
+  lab = rownames(res),
+  x = "log2FoldChange",
+  y = "padj",
+  max.overlaps = 10,
+  pCutoff = padj_cutoff,
+  FCcutoff = log2_fold_change_cutoff,
+  labSize = 3.0,
+  drawConnectors = FALSE,
+  xlim = c(-1.5, 1.5)
+)
+dev.off()
+
+png("07_Volcano_Plot_2.png")
+EnhancedVolcano(res,
+  lab = rownames(res),
+  x = "log2FoldChange",
+  y = "padj",
+  max.overlaps = 10,
+  pCutoff = padj_cutoff,
+  FCcutoff = log2_fold_change_cutoff,
+  labSize = 3.0,
+  drawConnectors = FALSE,
+  xlim = c(-1.5, 1.5),
+  ylim = c(0, 5)
+)
+dev.off()
+
+png("07_Volcano_Plot_3.png")
+EnhancedVolcano(res,
+  lab = rownames(res),
+  x = "log2FoldChange",
+  y = "padj",
+  max.overlaps = 10,
+  pCutoff = 0.01,
+  FCcutoff = 1,
+  labSize = 3.0,
+  drawConnectors = FALSE,
+  xlim = c(-1.5, 1.5),
+)
+dev.off()
+```
