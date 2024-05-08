@@ -95,8 +95,8 @@ df <- data.frame(colSums(count_matrix))
 ggplot(df) +
   geom_bar(
     aes(
-      x = rownames(df),
-      y = df[, 1]
+      x = rownames(count),
+      y = count[, 1]
     ),
     stat = "identity"
   ) +

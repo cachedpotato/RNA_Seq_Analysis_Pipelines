@@ -1,0 +1,61 @@
+## import necessary libraries
+
+```{r status, input = FALSE}
+library(tidyverse)
+```
+
+## get tsv files
+```{r status, input = FALSE}
+bcf_files <- dir(path = "./bcfout", pattern = ".tsv", full.names = TRUE)
+bcf_list <- lapply(
+    bcf_files,
+    function(x) read.table(x, header = FALSE, sep='\t')
+)
+head(bcf_list[[1]])
+```
+
+## mutation count per sample
+```{r status, input = FALSE}
+samples <- list("SRR10075970","SRR10075971","SRR10075972","SRR10075973","SRR10075974","SRR10075975")
+countMatrix = matrix(
+    ,
+    nrow = length(samples),
+    ncol = 1,
+    dimnames = list(samples, "count")
+)
+
+for (i in 1:nrow(countMatrix)) {
+    countMatrix[i, "count"] = nrow(bcf_list[[i]])
+}
+
+barchart <- ggplot(data = countMatrix) +
+  geom_bar(mapping = aes(x = rownames(countMatrix), y = count), stat = "identity")
+
+barchart
+ggsave("mutationCountPerSample.png")
+```
+
+## SComatic
+```{r status, input=FALSE}
+SComatic<- read.table(file = "./bcfout/SComatic_Results.tsv", sep='\t')
+head(SComatic)
+SComaticCount = matrix(
+    ,
+    nrow = length(samples),
+    ncol = 1,
+    dimnames = list(samples, "count")
+)
+
+for (i in 1:nrow(SComaticCount)) {
+    SComaticCount[i, "count"] = nrow(SComatic[SComatic[, 7] == rownames(SComaticCount)[i], ])
+}
+head(SComaticCount)
+
+scResults <- ggplot(SComaticCount) +
+  geom_bar(
+    mapping = aes(x = rownames(SComaticCount), y = count), stat = "identity"
+  )
+scResults
+
+ggsave("SComaticMutationCount.png")
+```
