@@ -2,6 +2,9 @@
 
 ```{r status, input = FALSE}
 library(tidyverse)
+library(dplyr)
+library(ggpubr)
+library(rstatix)
 ```
 
 ## get tsv files
@@ -16,46 +19,76 @@ head(bcf_list[[1]])
 
 ## mutation count per sample
 ```{r status, input = FALSE}
-samples <- list("SRR10075970","SRR10075971","SRR10075972","SRR10075973","SRR10075974","SRR10075975")
-countMatrix = matrix(
-    ,
-    nrow = length(samples),
-    ncol = 1,
-    dimnames = list(samples, "count")
-)
-
-for (i in 1:nrow(countMatrix)) {
-    countMatrix[i, "count"] = nrow(bcf_list[[i]])
+samples <- c("SRR10075970","SRR10075971","SRR10075972","SRR10075973","SRR10075974","SRR10075975")
+condition <- c(rep("control", 3), rep("DEX", 3))
+#bcftools varcall
+bcftoolsdf <- data.frame(count = c(rep(0,6)), condition = condition, name = samples)
+for (i in 1:nrow(bcftoolsdf)) {
+    bcftoolsdf[i, "count"] = nrow(bcf_list[[i]])
 }
+bcftoolsdf$condition <- as.factor(bcftoolsdf$condition)
 
-barchart <- ggplot(data = countMatrix) +
-  geom_bar(mapping = aes(x = rownames(countMatrix), y = count), stat = "identity")
-
-barchart
-ggsave("mutationCountPerSample.png")
-```
-
-## SComatic
-```{r status, input=FALSE}
-SComatic<- read.table(file = "./bcfout/SComatic_Results.tsv", sep='\t')
-head(SComatic)
-SComaticCount = matrix(
-    ,
-    nrow = length(samples),
-    ncol = 1,
-    dimnames = list(samples, "count")
-)
-
-for (i in 1:nrow(SComaticCount)) {
-    SComaticCount[i, "count"] = nrow(SComatic[SComatic[, 7] == rownames(SComaticCount)[i], ])
+#SComatic
+SComatic<- read.table(file = "SComatic_Results.tsv", sep='\t')[,1:10]
+SComaticdf <- data.frame(count = c(rep(0,6)), condition = condition, name = samples)
+for (i in 1:nrow(SComaticdf)) {
+    SComaticdf[i, "count"] = nrow(SComatic[SComatic[, 7] == SComaticdf[i, "name"], ])
 }
-head(SComaticCount)
+SComaticdf$condition <- as.factor(SComaticdf$condition)
 
-scResults <- ggplot(SComaticCount) +
-  geom_bar(
-    mapping = aes(x = rownames(SComaticCount), y = count), stat = "identity"
-  )
-scResults
+methods <- list("bcftools", "SComatic")
+dfs <- list(bcftoolsdf, SComaticdf)
+for (i in 1:2) {
+  the_data = dfs[[i]]
+  stat <- the_data |> 
+    rstatix::wilcox_test(count ~ condition) |> 
+    adjust_pvalue(method = "bonferroni") |> 
+    add_significance("p.adj") |>
+    add_xy_position(x = "condition", dodge = 0.8)
 
-ggsave("SComaticMutationCount.png")
+  #create plot
+  boxplot <- ggplot(data = the_data, mapping = aes(x = condition, y = count)) +
+    geom_boxplot() +
+    geom_point(mapping = aes(color = name), size = 4) + 
+    geom_bracket(
+      xmin = "control",
+      xmax = "DEX",
+      y.position = max(the_data$count)*1.01,
+      label = paste("padj = ", stat[["p.adj"]], sep=""),
+      label.size = 10,
+      tip.length = 0.01
+    ) + 
+    theme(
+      axis.title.x = element_text(size = 30),
+      axis.title.y = element_text(size = 30),
+      axis.text.x = element_text(size = 30),
+      axis.text.y = element_text(size = 15),
+      legend.title = element_text(size = 18),
+      legend.text = element_text(size = 18),
+      
+    )
+  ggsave(paste("Mutation_Count_Method_", methods[[i]], "_box.png", sep = ""), width = 20, height = 30)
+
+  #create bar plot for real this time
+  barplot <- ggplot(data = the_data, mapping = aes(x = condition, y = count)) +
+    geom_bracket(
+      xmin = "control",
+      xmax = "DEX",
+      y.position = max(the_data$count)*1.01,
+      label = paste("padj = ", stat[["p.adj"]], sep=""),
+      label.size = 10,
+      tip.length = 0.01
+    ) +
+    geom_col(mapping = aes(fill = name), position = "dodge") +
+    scale_fill_grey() +
+    theme(
+      axis.title.x = element_text(size = 30),
+      axis.title.y = element_text(size = 30),
+      axis.text.x = element_text(size = 30),
+      axis.text.y = element_text(size = 15),
+      legend.title = element_text(size = 18),
+      legend.text = element_text(size = 18),
+    )
+  ggsave(paste("Mutation_Count_Method_", methods[[i]], "_bar.png", sep = ""), width = 20, height = 30)
+}
 ```
