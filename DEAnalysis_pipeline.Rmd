@@ -260,94 +260,45 @@ for (i in seq_len(nrow(normcount_var))) {
   normcount_var[i, 1] <- sd(normcount[i, ])
 }
 normcount_var[, 2] <- rank(-1 * normcount_var[, 1])
-
-data_sub_t <-
-  as.data.frame(
-    ## Column: genes, ##Rows: samples
-    t(normcount[normcount_var[, 1] != 0, ]) #includes entire gene / TODO: top  (rank) 1000/2000
-  )
-data_pca_scale <- prcomp(data_sub_t, center = TRUE, scale = TRUE)
-ind_coord <- data_pca_scale$x
 data_lab_mat_sub <- c("blue", "blue", "blue", "skyblue", "skyblue", "skyblue")
-png("02_PCA_Tutorial_Version_PC12.png")
-plot(
-  ind_coord[, 1], ind_coord[, 2],
-  col = data_lab_mat_sub, pch = 16, xlab = "PC1", ylab = "PC2", cex = 1
-)
-legend(
-  "topleft",
-  legend = c("Control", "DEX"), pch = 16, col = c("blue", "skyblue"), cex = 0.5
-)
-dev.off()
-png("02_PCA_Tutorial_Version_PC13.png")
-plot(
-  ind_coord[, 1], ind_coord[, 3],
-  col = data_lab_mat_sub, pch = 16, xlab = "PC1", ylab = "PC3", cex = 1
-)
-legend(
-  "topleft",
-  legend = c("Control", "DEX"), pch = 16, col = c("blue", "skyblue"), cex = 0.5
-)
-dev.off()
-png("02_PCA_Tutorial_Version_PC23.png")
-plot(
-  ind_coord[, 2], ind_coord[, 3],
-  col = data_lab_mat_sub, pch = 16, xlab = "PC2", ylab = "PC3", cex = 1
-)
-legend(
-  "topleft",
-  legend = c("Control", "DEX"), pch = 16, col = c("blue", "skyblue"), cex = 0.5
-)
-dev.off()
-```
 
-```{r status, input = FALSE}
-
-for (i in list(1001, 2001)){
+for (c in list(nrow(normcount_var), 1000, 2000)) {
   data_sub_t <-
     as.data.frame(
       ## Column: genes, ##Rows: samples
-      t(normcount[normcount_var[, 1] != 0 & normcount_var[,2] < i, ]) #includes entire gene / TODO: top  (rank) 1000/2000
+      t(normcount[normcount_var[, 1] != 0 & normcount_var[,2] < c + 1, ]) #includes entire gene / TODO: top  (rank) 1000/2000
     )
   data_pca_scale <- prcomp(data_sub_t, center = TRUE, scale = TRUE)
   ind_coord <- data_pca_scale$x
-  data_lab_mat_sub <- c("blue", "blue", "blue", "skyblue", "skyblue", "skyblue")
-  head(ind_coord)
-  png(paste("02_PCA_Top_", i, "genes_PC12.png", sep = ""))
-  plot(
-    ind_coord[, 1], ind_coord[, 2],
-    col = data_lab_mat_sub, pch = 16, xlab = "PC1", ylab = "PC2", cex = 1
-  )
-  legend(
-    "bottomright",
-    legend = c("Control", "DEX"), pch = 16, col = c("#3434c0", "skyblue"), cex = 0.5
-  )
-  dev.off()
-
+  title_PCs <- c("PC12", "PC13", "PC23")
+  PCPairs <- list(c("PC1", "PC2"), c("PC1", "PC3"), c("PC2", "PC3"))
+  xyPCPairs <- list(c(1, 2), c(1, 3), c(2, 3))
+  for (i in 1:3) {
+    png(
+      paste("02_PCA_Tutorial_Version_", title_PCs[[i]], "_withgenecount_", c, ".png", sep = ""),
+      width = 600,
+      height = 600
+    )
+    plot(
+      ind_coord[, xyPCPairs[[i]][1]], ind_coord[, xyPCPairs[[i]][2]],
+      main = paste("PCA_Results, Gene Count: ", c, sep = ""),
+      col = data_lab_mat_sub, pch = 16, xlab = PCPairs[[i]][1], ylab = PCPairs[[i]][2], cex = 1
+    )
+    legend(
+      "bottomright",
+      legend = c("Control", "DEX"), pch = 16, col = c("blue", "skyblue"), cex = 0.6
+    )
+    text(
+      ind_coord[, xyPCPairs[[i]][1]], ind_coord[, xyPCPairs[[i]][2]],
+      cex = 0.5, labels = rownames(ind_coord), pos = 3
+    )
+    dev.off()
+  }
   
-  png(paste("02_PCA_Top_", i, "genes_PC13.png", sep = ""))
-  plot(
-    ind_coord[, 1], ind_coord[, 3],
-    col = data_lab_mat_sub, pch = 16, xlab = "PC1", ylab = "PC3", cex = 1
-  )
-  legend(
-    "bottomright",
-    legend = c("Control", "DEX"), pch = 16, col = c("blue", "skyblue"), cex = 0.5
-  )
-  dev.off()
-
-  png(paste("02_PCA_Top_", i, "genes_PC23.png", sep = ""))
-  plot(
-    ind_coord[, 2], ind_coord[, 3],
-    col = data_lab_mat_sub, pch = 16, xlab = "PC2", ylab = "PC3", cex = 1
-  )
-  legend(
-    "bottomright",
-    legend = c("Control", "DEX"), pch = 16, col = c("blue", "skyblue"), cex = 0.5
-  )
-  dev.off()
 }
+
 ```
+
 1.1 3D PCA cause why not
 ```{r status, input = FALSE}
 pca_scores <- as.data.frame(data_pca_scale$x)
