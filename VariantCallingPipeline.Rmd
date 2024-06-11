@@ -1,0 +1,263 @@
+## 0. Importing Required Packages
+```{r setup, include=FALSE}
+library(tidyverse)
+library(DESeq2)
+library(xtable)
+library(gplots)
+library(RColorBrewer)
+library(factoextra)
+library(ggpubr)
+library(pheatmap)
+library(gplots)
+library(EnhancedVolcano)
+library(stringr)
+library(patchwork)
+library(rgl)
+library(edgeR)
+library(GGally)
+```
+
+## 1. Loading Samples and Gene Info
+For DEG Analysis, we need the following:
+* Gene Count Matrix
+* Gene Info (For additional/meta gene information)
+The count matrix should have the dimensions:
+* Cols: Samples
+* Rows: Genes
+```{r setup, include=FALSE}
+# Loading htseq files
+htseq_files <- dir(path = "./htseq", pattern = ".out", full.names = TRUE)
+htseq_table_list <- lapply(
+  htseq_files,
+  function(x) read.table(x, sep = "\t")
+)
+unique_genes <- unique(unlist(
+  # "[[" searches through elements, the 3rd argument is the column number
+  lapply(htseq_table_list, "[[", 1),
+  use.names = FALSE
+))
+sample_names <- str_extract(htseq_files, pattern = "SRR[0-9]+")
+# Loading gene info
+gene_info <- read.table("geneInfo_copy.tsv", sep = "\t")
+
+# creating count matrix
+# create empty count matrix
+# rownames will be gene names not the gene ID
+count_matrix <- structure(
+  matrix(
+    as.integer(NA),
+    nrow = length(unique_genes),
+    ncol = length(htseq_files)
+  ),
+  dimnames = list(unique_genes, sample_names)
+)
+# fill in the count matrix column-wise
+for (i in seq(length(htseq_table_list))) {
+  count_matrix[match(htseq_table_list[[i]]$V1, rownames(count_matrix)), i] <-
+    htseq_table_list[[i]]$V2
+}
+# drop non-unique alignments and non-gene entries
+drop_classes <- c(
+  "__alignment_not_unique", "__no_feature", "__ambiguous",
+  "__too_low_aQual", "__not_aligned"
+)
+if (any(drop_classes %in% rownames(count_matrix))) {
+  count_matrix <- count_matrix[-match(drop_classes, rownames(count_matrix)), ]
+}
+# changing row and column names
+# row names will be the gene names instead of gene IDs
+# Column names will be sample replication names instead of ENA IDs
+colnames(count_matrix) <- c(
+  "Naive_Control_Rep_1",
+  "Naive_Control_Rep_2",
+  "Naive_Control_Rep_3",
+  "Naive_DEX_Rep_1",
+  "Naive_DEX_Rep_2",
+  "Naive_DEX_Rep_3"
+)
+rownames(count_matrix) <-
+  gene_info[match(rownames(count_matrix), gene_info$V1), 2]
+head(count_matrix)
+```
+
+## 3. Differentially Expressed Gene Analysis
+# 3.0 DESeq Preparation and Normalization
+```{r setup, include = FALSE}
+# make condition matrix for sample information
+col_data <- as.data.frame(c(
+  rep("Naive_Control", 3),
+  rep("Naive_DEX", 3)
+))
+rownames(col_data) <- colnames(count_matrix)
+colnames(col_data) <- "condition"
+
+dds <- DESeqDataSetFromMatrix(
+  countData = count_matrix,
+  colData = col_data,
+  design = ~condition
+)
+keep <- rowSums(counts(dds)) >= 10
+dds <- dds[keep, ]
+dds <- DESeq(dds)
+
+
+#Normalization Methods
+#Deseq2
+#TMM
+#Quantile
+
+normcount <- counts(dds, normalized = TRUE)
+write.csv(as.data.frame(normcount), file = "normcount.csv")
+res <- results(dds, contrast = c("condition", "Naive_DEX", "Naive_Control"))
+
+log2_fold_change_cutoff <- 0.58
+padj_cutoff <- 0.05
+# preparation for heatmap - regulated genes classification
+res$DEG <- 2
+# Up-regulated genes
+res[
+  res$padj < padj_cutoff &
+    res$log2FoldChange > log2_fold_change_cutoff &
+    is.na(res$padj) == 0,
+  7
+] <- 1
+# Down-regulated genes
+res[
+  res$padj < padj_cutoff &
+    res$log2FoldChange < (-log2_fold_change_cutoff) &
+    is.na(res$padj) == 0,
+  7
+] <- 3
+
+# Extracting transformed values - Variance Stabilizing Transformation
+vsd <- vst(dds, blind = FALSE)
+rld <- rlog(dds, blind = FALSE)
+ntd <- normTransform(dds)
+
+head(res)
+head(assay(vsd))
+
+#edgeR for different normalization method
+
+sample_info <- c(
+  rep("Naive_Control", 3),
+  rep("Naive_DEX", 3)
+)
+dge <- DGEList(count_matrix, group = factor(sample_info))
+keep_dge <- filterByExpr(y = dge)
+dge <- dge[keep_dge, ,keep.lib.sizes = FALSE]
+
+#top_TMM <- calcNormFactors(dge, "TMM") |>
+#  estimateDisp() |>
+#  exactTest() |>
+#  topTags()
+#
+#top_TMMwsp <- calcNormFactors(dge, "TMMwsp") |>
+#  estimateDisp() |>
+#  exactTest() |>
+#  topTags()
+#
+#top_RLE <- calcNormFactors(dge, "RLE") |>
+#  estimateDisp() |>
+#  exactTest() |>
+#  topTags()
+#
+#top_upperquartile <- calcNormFactors(dge, "upperquartile") |>
+#  estimateDisp() |>
+#  exactTest() |>
+#  topTags()
+
+dge_TMM <- calcNormFactors(dge, "TMM")
+dge_TMMwsp <- calcNormFactors(dge, "TMMwsp")
+dge_RLE <- calcNormFactors(dge, "RLE")
+dge_upperquartile <- calcNormFactors(dge, "upperquartile")
+
+dge_TMM <- estimateDisp(y = dge_TMM)
+dge_TMMwsp <- estimateDisp(y = dge_TMMwsp)
+dge_RLE <- estimateDisp(y = dge_RLE)
+dge_upperquartile <- estimateDisp(y = dge_upperquartile)
+
+
+et_TMM <- exactTest(object = dge_TMM)
+et_TMMwsp <- exactTest(object = dge_TMMwsp)
+et_RLE <- exactTest(object = dge_RLE)
+et_upperquartile <- exactTest(object = dge_upperquartile)
+
+
+top_TMM <- topTags(object = et_TMM)
+top_TMMwsp <- topTags(object = et_TMMwsp)
+top_RLE <- topTags(object = et_RLE)
+top_upperquartile <- topTags(object = et_upperquartile)
+
+#normalized count matrix
+nc_TMM <- cpm(dge_TMM)
+nc_TMMwsp <- cpm(dge_TMMwsp)
+nc_RLE <- cpm(dge_RLE)
+nc_upperquartile <- cpm(dge_upperquartile)
+
+```
+
+# Variant calling scatter plot
+```{r status, input = FALSE}
+RESULTS_ROOT_DIR <- "./gene_find_results/"
+samples <- c("SRR10075970","SRR10075971","SRR10075972","SRR10075973","SRR10075974","SRR10075975")
+column_names <- c(
+  "Naive_Control_Rep_1",
+  "Naive_Control_Rep_2",
+  "Naive_Control_Rep_3",
+  "Naive_DEX_Rep_1",
+  "Naive_DEX_Rep_2",
+  "Naive_DEX_Rep_3"
+)
+for (i in seq(length(samples))) {
+  varCallResult <- read.table(paste(RESULTS_ROOT_DIR, samples[i], "VariantPositionsWithGeneInfo.txt", sep = ""), sep = "\t", header = TRUE) |>
+    filter(X7 != "GENE NOT FOUND")
+  snp_count_per_gene <- table(varCallResult$X7)
+  snp_count_per_gene <- as.data.frame.table(snp_count_per_gene)
+  rownames(snp_count_per_gene) <- snp_count_per_gene$Var1
+  snp_count_per_gene$Var1 <- NULL
+  snp_count_per_gene[, "Normalized_Count"] <- 0
+  snp_count_per_gene$Normalized_Count = normcount[match(row.names(snp_count_per_gene), row.names(normcount)), column_names[i]]
+
+  #for (j in seq(length(rownames(snp_count_per_gene)))) {
+  #  snp_count_per_gene[i, "Normalized_Count"] <-
+  #    normcount[match(rownames(snp_count_per_gene)[j], row.names(normcount)), column_names[i]]
+  #}
+  snp_count_per_gene[, "Log_Count"] <- log2(snp_count_per_gene$Normalized_Count + 1)
+  write.table(snp_count_per_gene, paste(RESULTS_ROOT_DIR, samples[i], "countmatrix.tsv",sep = ""), sep = "\t")
+  snp_count_per_gene_filtered <- filter(snp_count_per_gene, !is.na(Normalized_Count))
+  write.table(snp_count_per_gene_filtered, paste(RESULTS_ROOT_DIR, samples[i], "countmatrix_filtered.tsv", sep = ""), sep = "\t")
+
+
+  ggplot(data = snp_count_per_gene_filtered) +
+    geom_point(mapping = aes(
+      x = Log_Count,
+      y = Freq,
+    ), ) +
+    labs(
+      title = "SNP Frequency by log gene count",
+      subtitle = paste("Correlation = ", cor(snp_count_per_gene_filtered$Log_Count, snp_count_per_gene_filtered$Freq))
+    )
+  ggsave(
+    paste(RESULTS_ROOT_DIR, "varCountScatterPlot", samples[i], ".png", sep = ""),
+    height = 20,
+    width = 12,
+  )
+}
+```
+
+# Get the outlier genes
+```{r status, input = FALSE}
+gene_info <- read.table("geneInfo.tab", sep = "\t", header = FALSE)
+top_10_acc = data.frame(matrix(ncol = length(samples), nrow = 10), row.names = samples)
+for (i in seq(length(samples))) {
+  top_10 <- read.table(paste(RESULTS_ROOT_DIR, samples[i], "countmatrix_filtered.tsv", sep = ""), sep = "\t", header = TRUE)
+  top_10 <- top_10[order(top_10$Freq, decreasing = TRUE), ] |>
+    head(10)
+  top_10[, "gene_name"] <- ""
+  top_10[, "gene_name"] <- gene_info[match(rownames(top_10), gene_info$V1), "V2"]
+  write.table(top_10, paste(RESULTS_ROOT_DIR, samples[i],"top10MutatedGenes.tsv", sep = ""), sep = "\t")
+
+  top_10_acc[, samples[i]] = top_10[, "gene_name"]
+}
+```
